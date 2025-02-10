@@ -1,0 +1,1334 @@
+import React, { useState, useEffect, useRef } from 'react';
+import * as d3 from 'd3';
+
+const parseGEDCOM = (content) => {
+  const lines = content.split('\n');
+  const individuals = {};
+  const families = {};
+  let currentEntity = null;
+  let currentType = null;
+  let currentSubTag = null;
+
+  lines.forEach(line => {
+    if (!line.trim()) return;
+    
+    const [level, ...rest] = line.trim().split(' ');
+    const levelNum = parseInt(level);
+    
+    if (levelNum === 0) {
+      const id = rest[0];
+      const type = rest[1];
+      
+      if (type === 'INDI') {
+        currentType = 'INDI';
+        currentEntity = id.replace(/@/g, '');
+        individuals[currentEntity] = { 
+          id: currentEntity,
+          name: 'Unknown',
+          gender: 'U',
+          birth: {}
+        };
+      } else if (type === 'FAM') {
+        currentType = 'FAM';
+        currentEntity = id.replace(/@/g, '');
+        families[currentEntity] = { 
+          id: currentEntity,
+          husband: null,
+          wife: null,
+          children: []
+        };
+      } else {
+        currentType = null;
+        currentEntity = null;
+      }
+    } else if (currentEntity) {
+      const tag = rest[0];
+      const value = rest.slice(1).join(' ');
+
+      if (currentType === 'INDI') {
+        switch(tag) {
+          case 'NAME':
+            individuals[currentEntity].name = value.replace(/\//g, '').trim() || 'Unknown';
+            break;
+          case 'SEX':
+            individuals[currentEntity].gender = value || 'U';
+            break;
+          case 'BIRT':
+            currentSubTag = 'BIRT';
+            break;
+          case 'DATE':
+            if (currentSubTag === 'BIRT') {
+              individuals[currentEntity].birth.date = value;
+            }
+            break;
+          default:
+            break;
+        }
+      } else if (currentType === 'FAM') {
+        switch(tag) {
+          case 'HUSB':
+            families[currentEntity].husband = value.replace(/@/g, '');
+            break;
+          case 'WIFE':
+            families[currentEntity].wife = value.replace(/@/g, '');
+            break;
+          case 'CHIL':
+            const childId = value.replace(/@/g, '');
+            if (!families[currentEntity].children.includes(childId)) {
+              families[currentEntity].children.push(childId);
+            }
+            break;
+          default:
+            break;
+        }
+      }
+    }
+  });
+
+  return { individuals, families };
+};
+const PersonDetailsPanel = ({ 
+  person, 
+  onClose, 
+  onSave, 
+  onDelete, 
+  onAddChild, 
+  onAddParent,
+  onAddSpouse, 
+  individuals, 
+  families 
+}) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedPerson, setEditedPerson] = useState(person);
+  const [selectedRelativePerson, setSelectedRelativePerson] = useState(null);
+  const [relationship, setRelationship] = useState(null);
+
+  const findRelationship = (relativeId) => {
+    if (!relativeId || !person) {
+      setRelationship(null);
+      return;
+    }
+
+    const relativePerson = individuals[relativeId];
+    
+    // Helper function to find all ancestors up to N generations
+    const findAncestors = (personId, generations = 4) => {
+      const ancestors = new Set();
+      const queue = [{id: personId, generation: 0}];
+      
+      while (queue.length > 0) {
+        const current = queue.shift();
+        if (current.generation >= generations) continue;
+        
+        // Find parents through families
+        Object.values(families).forEach(family => {
+          if (family.children.includes(current.id)) {
+            if (family.husband) {
+              ancestors.add(family.husband);
+              queue.push({id: family.husband, generation: current.generation + 1});
+            }
+            if (family.wife) {
+              ancestors.add(family.wife);
+              queue.push({id: family.wife, generation: current.generation + 1});
+            }
+          }
+        });
+      }
+      return ancestors;
+    };
+    
+    // Find all descendants up to N generations
+    const findDescendants = (personId, generations = 4) => {
+      const descendants = new Set();
+      const queue = [{id: personId, generation: 0}];
+      
+      while (queue.length > 0) {
+        const current = queue.shift();
+        if (current.generation >= generations) continue;
+        
+        Object.values(families).forEach(family => {
+          if (family.husband === current.id || family.wife === current.id) {
+            family.children.forEach(childId => {
+              descendants.add(childId);
+              queue.push({id: childId, generation: current.generation + 1});
+            });
+          }
+        });
+      }
+      return descendants;
+    };
+
+    // Check for direct relationships first
+    // Spouse
+    const isSpouse = Object.values(families).some(family => 
+      (family.husband === person.id && family.wife === relativeId) ||
+      (family.wife === person.id && family.husband === relativeId)
+    );
+    
+    if (isSpouse) {
+      setRelationship(relativePerson.gender === 'M' ? 'Husband' : 'Wife');
+      return;
+    }
+
+    // Parent-Child
+    const parentChildFamily = Object.values(families).find(family => {
+      const isParent = (family.husband === person.id || family.wife === person.id) && 
+                      family.children.includes(relativeId);
+      const isChild = (family.husband === relativeId || family.wife === relativeId) && 
+                     family.children.includes(person.id);
+      return isParent || isChild;
+    });
+
+    if (parentChildFamily) {
+      if (parentChildFamily.children.includes(relativeId)) {
+        setRelationship(relativePerson.gender === 'M' ? 'Son' : 'Daughter');
+        return;
+      } else if (parentChildFamily.children.includes(person.id)) {
+        setRelationship(relativePerson.gender === 'M' ? 'Father' : 'Mother');
+        return;
+      }
+    }
+
+    // Sibling
+    const areSiblings = Object.values(families).some(family => 
+      family.children.includes(person.id) && family.children.includes(relativeId)
+    );
+
+    if (areSiblings) {
+      setRelationship(relativePerson.gender === 'M' ? 'Brother' : 'Sister');
+      return;
+    }
+
+    // Check for more distant relationships
+    const personAncestors = findAncestors(person.id);
+    const personDescendants = findDescendants(person.id);
+    const relativeAncestors = findAncestors(relativeId);
+    const relativeDescendants = findDescendants(relativeId);
+
+    // Check for uncle/aunt or nephew/niece relationships
+    const personParents = new Set();
+    const relativeParents = new Set();
+    
+    Object.values(families).forEach(family => {
+      if (family.children.includes(person.id)) {
+        if (family.husband) personParents.add(family.husband);
+        if (family.wife) personParents.add(family.wife);
+      }
+      if (family.children.includes(relativeId)) {
+        if (family.husband) relativeParents.add(family.husband);
+        if (family.wife) relativeParents.add(family.wife);
+      }
+    });
+
+    const isUncleAunt = Array.from(personParents).some(parentId => 
+      Object.values(families).some(family => 
+        family.children.includes(parentId) && 
+        (family.children.includes(relativeId) || family.husband === relativeId || family.wife === relativeId)
+      )
+    );
+
+    const isNephewNiece = Array.from(relativeParents).some(parentId => 
+      Object.values(families).some(family => 
+        family.children.includes(parentId) && 
+        (family.children.includes(person.id) || family.husband === person.id || family.wife === person.id)
+      )
+    );
+
+    if (isUncleAunt) {
+      setRelationship(relativePerson.gender === 'M' ? 'Uncle' : 'Aunt');
+      return;
+    }
+
+    if (isNephewNiece) {
+      setRelationship(relativePerson.gender === 'M' ? 'Nephew' : 'Niece');
+      return;
+    }
+
+    // Cousin check
+    const hasCommonAncestor = Array.from(personAncestors).some(ancestor => 
+      relativeAncestors.has(ancestor)
+    );
+
+    if (hasCommonAncestor) {
+      setRelationship('Cousin');
+      return;
+    }
+
+    // Grandparent/Grandchild
+    if (personDescendants.has(relativeId)) {
+      setRelationship(relativePerson.gender === 'M' ? 'Grandson' : 'Granddaughter');
+      return;
+    }
+
+    if (relativeDescendants.has(person.id)) {
+      setRelationship(relativePerson.gender === 'M' ? 'Grandfather' : 'Grandmother');
+      return;
+    }
+
+    setRelationship('Relative');
+  };
+
+  useEffect(() => {
+    setEditedPerson(person);
+    setIsEditing(false);
+  }, [person]);
+
+  const handleChange = (field, value) => {
+    setEditedPerson(prev => {
+      if (field === 'birth') {
+        return {
+          ...prev,
+          birth: { ...prev.birth, date: value }
+        };
+      }
+      return {
+        ...prev,
+        [field]: value
+      };
+    });
+  };
+
+  const handleSave = () => {
+    onSave(editedPerson);
+    setIsEditing(false);
+  };
+
+  const hasParent = (gender) => {
+    return Object.values(families).some(family => {
+      if (family.children.includes(person.id)) {
+        return gender === 'M' ? family.husband : family.wife;
+      }
+      return false;
+    });
+  };
+  const hasSpouse = () => {
+    return Object.values(families).some(family => {
+      return (person.gender === 'M' && family.husband === person.id && family.wife) ||
+             (person.gender === 'F' && family.wife === person.id && family.husband);
+    });
+  };
+
+  return (
+    <div className="fixed right-4 top-4 w-80 bg-white p-4 rounded-lg shadow-xl border border-gray-200 z-50">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-lg font-semibold text-gray-900">Person Details</h3>
+        <button 
+          onClick={onClose}
+          className="text-gray-400 hover:text-gray-600 focus:outline-none"
+        >
+          ×
+        </button>
+      </div>
+      
+      {isEditing ? (
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Name:</label>
+            <input
+              type="text"
+              value={editedPerson.name || ''}
+              onChange={(e) => handleChange('name', e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Gender:</label>
+            <select
+              value={editedPerson.gender || 'U'}
+              onChange={(e) => handleChange('gender', e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="M">Male</option>
+              <option value="F">Female</option>
+              <option value="U">Unknown</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Birth Date:</label>
+            <input
+              type="text"
+              value={editedPerson.birth?.date || ''}
+              onChange={(e) => handleChange('birth', e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              placeholder="e.g., 1 JAN 1990"
+            />
+          </div>
+          
+          <div className="flex gap-2 mt-4">
+            <button 
+              onClick={handleSave}
+              className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+            >
+              Save
+            </button>
+            <button 
+              onClick={() => {
+                setIsEditing(false);
+                setEditedPerson(person);
+              }}
+              className="flex-1 px-4 py-2 text-sm font-medium text-white bg-gray-600 rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-sm"><span className="font-medium">Name:</span> {editedPerson.name || 'Unknown'}</p>
+          <p className="text-sm"><span className="font-medium">Gender:</span> {editedPerson.gender === 'M' ? 'Male' : editedPerson.gender === 'F' ? 'Female' : 'Unknown'}</p>
+          <p className="text-sm"><span className="font-medium">Birth Date:</span> {editedPerson.birth?.date || 'Unknown'}</p>
+
+          <div className="mt-6 pt-4 border-t border-gray-200">
+            <h4 className="font-medium text-sm mb-2">Find Relationship</h4>
+            <select 
+              value={selectedRelativePerson || ''}
+              onChange={(e) => {
+                const selectedId = e.target.value;
+                setSelectedRelativePerson(selectedId);
+                findRelationship(selectedId);
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-2"
+            >
+              <option value="">Select a Person</option>
+              {Object.values(individuals)
+                .filter(ind => ind.id !== person.id)
+                .map(ind => (
+                  <option key={ind.id} value={ind.id}>
+                    {ind.name}
+                  </option>
+                ))
+              }
+            </select>
+            
+            {relationship && (
+              <div className="bg-gray-50 p-3 rounded-md">
+                <p className="text-sm">
+                  Relationship: <span className="font-medium">{relationship}</span>
+                </p>
+              </div>
+            )}
+          </div>
+
+         
+          <div className="flex flex-col gap-2 mt-4">
+            <div className="flex gap-2">
+              <button 
+                onClick={() => setIsEditing(true)}
+                className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+              >
+                Edit
+              </button>
+              <button 
+                onClick={() => onDelete(person.id)}
+                className="flex-1 px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+              >
+                Delete
+              </button>
+            </div>
+
+            <div className="flex gap-2">
+              {!hasParent('M') && (
+                <button 
+                  onClick={() => onAddParent(person.id, 'M')}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                >
+                  Add Father
+                </button>
+              )}
+              {!hasParent('F') && (
+                <button 
+                  onClick={() => onAddParent(person.id, 'F')}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-pink-600 rounded-md hover:bg-pink-700 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2"
+                >
+                  Add Mother
+                </button>
+              )}
+            </div>
+
+            <button 
+              onClick={() => onAddChild(person.id)}
+              className="w-full px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+            >
+              Add Child
+            </button>
+
+            <button 
+              onClick={() => onAddSpouse(person.id)}
+              className="w-full px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
+            >
+              Add Partner
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+const FamilyTree = () => {
+  const [data, setData] = useState(null);
+  const [selectedPerson, setSelectedPerson] = useState(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [error, setError] = useState(null);
+  const [parsedData, setParsedData] = useState(null);
+  const [gedcomText, setGedcomText] = useState('');
+  const svgRef = useRef();
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [contextMenu, setContextMenu] = useState(null);
+  
+  const findRootFamily = (individuals, families) => {
+    // Create a set of all individuals who are children
+    const childrenSet = new Set();
+    Object.values(families).forEach(family => {
+      family.children.forEach(childId => childrenSet.add(childId));
+    });
+  
+    // Find individuals who are parents but not children (potential roots)
+    const potentialRoots = Object.values(individuals)
+      .filter(individual => {
+        const isParent = Object.values(families).some(
+          family => family.husband === individual.id || family.wife === individual.id
+        );
+        return isParent && !childrenSet.has(individual.id);
+      });
+  
+    // Find the family where these individuals are parents
+    if (potentialRoots.length > 0) {
+      const rootFamily = Object.values(families).find(
+        family => 
+          potentialRoots.some(root => 
+            family.husband === root.id || family.wife === root.id
+          )
+      );
+      return rootFamily;
+    }
+  
+    // If no root found, return the first family as fallback
+    return Object.values(families)[0];
+  };  
+  
+  
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    setError(null);
+    setData(null);
+    setSelectedPerson(null);
+    setShowDetails(false);
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const gedcomData = parseGEDCOM(e.target.result);
+          setParsedData(gedcomData);
+          setGedcomText(e.target.result);
+        } catch (err) {
+          setError('Error parsing GEDCOM file. Please check the file format.');
+          console.error('Parsing error:', err);
+        }
+      };
+      reader.onerror = () => {
+        setError('Error reading file. Please try again.');
+      };
+      reader.readAsText(file);
+    }
+  };
+  
+  const handleTextInput = (event) => {
+    const text = event.target.value;
+    setGedcomText(text);
+    try {
+      const gedcomData = parseGEDCOM(text);
+      setParsedData(gedcomData);
+      setError(null);
+    } catch (err) {
+      setError('Error parsing GEDCOM text. Please check the format.');
+      console.error('Parsing error:', err);
+    }
+  };
+
+  const handleGenerateTree = () => {
+    if (!parsedData) {
+      setError('Please provide GEDCOM data first.');
+      return;
+    }
+  
+    const { individuals, families } = parsedData;
+    if (!individuals || !families || Object.keys(families).length === 0) {
+      setError('No valid family data found.');
+      return;
+    }
+  
+    setError(null);
+    const rootFamily = findRootFamily(individuals, families);
+    setData({ individuals, families, rootFamily });
+  };
+  
+  const handleNodeClick = (person) => {
+    setSelectedPerson(person);
+    setShowDetails(true);
+  };
+
+  const handleDetailsSave = (updatedPerson) => {
+    if (!data) return;
+  
+    const updatedIndividuals = {
+      ...data.individuals,
+      [updatedPerson.id]: updatedPerson
+    };
+  
+    const newData = {
+      ...data,
+      individuals: updatedIndividuals
+    };
+  
+    setData(newData);
+    setSelectedPerson(updatedPerson);
+  
+    const updatedGedcom = generateUpdatedGEDCOM(updatedIndividuals, data.families);
+    setGedcomText(updatedGedcom);
+  };
+
+  // Add this function in FamilyTree component
+const handleDeletePerson = (personId) => {
+  if (!data || !personId) return;
+
+  // Create confirmation dialog
+  if (!window.confirm('Are you sure you want to delete this person?')) {
+    return;
+  }
+
+  // Create new copies of the data
+  const updatedIndividuals = { ...data.individuals };
+  const updatedFamilies = { ...data.families };
+
+  // Remove person from individuals
+  delete updatedIndividuals[personId];
+
+  // Remove person from all families
+  Object.values(updatedFamilies).forEach(family => {
+    if (family.husband === personId) family.husband = null;
+    if (family.wife === personId) family.wife = null;
+    if (family.children.includes(personId)) {
+      family.children = family.children.filter(id => id !== personId);
+    }
+  });
+
+  // Update data
+  const newData = {
+    ...data,
+    individuals: updatedIndividuals,
+    families: updatedFamilies
+  };
+
+  setData(newData);
+  setShowDetails(false);
+  setSelectedPerson(null);
+
+  // Update GEDCOM text
+  const updatedGedcom = generateUpdatedGEDCOM(updatedIndividuals, updatedFamilies);
+  setGedcomText(updatedGedcom);
+};
+
+// Add this component for the context menu
+const ContextMenu = ({ x, y, onClose, onEdit, onDelete }) => {
+  const menuRef = useRef(null);
+  const [adjustedPosition, setAdjustedPosition] = useState({ x, y });
+
+  useEffect(() => {
+    if (menuRef.current) {
+      const menuRect = menuRef.current.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+
+      let adjustedX = x;
+      let adjustedY = y;
+
+      // Adjust horizontal position if menu would go off screen
+      if (x + menuRect.width > viewportWidth) {
+        adjustedX = viewportWidth - menuRect.width - 10;
+      }
+
+      // Adjust vertical position if menu would go off screen
+      if (y + menuRect.height > viewportHeight) {
+        adjustedY = viewportHeight - menuRect.height - 10;
+      }
+
+      setAdjustedPosition({ x: adjustedX, y: adjustedY });
+    }
+  }, [x, y]);
+
+  return (
+    <div 
+      ref={menuRef}
+      className="fixed bg-white shadow-lg rounded-md py-1 border border-gray-200 z-50"
+      style={{ 
+        left: adjustedPosition.x, 
+        top: adjustedPosition.y,
+        minWidth: '100px'
+      }}
+    >
+      <button 
+        onClick={onEdit}
+        className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100"
+      >
+        Edit
+      </button>
+      <button 
+        onClick={onDelete}
+        className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-gray-100"
+      >
+        Delete
+      </button>
+    </div>
+  );
+};
+// Add these functions in the FamilyTree component
+const generateNewId = (type) => {
+  // Generate a unique ID for new individuals or families
+  const prefix = type === 'person' ? 'I' : 'F';
+  const existingIds = Object.keys(type === 'person' ? data.individuals : data.families);
+  let maxNum = 0;
+  
+  existingIds.forEach(id => {
+    const num = parseInt(id.replace(prefix, ''));
+    if (!isNaN(num) && num > maxNum) maxNum = num;
+  });
+  
+  return `${prefix}${maxNum + 1}`;
+};
+// Add this function in the FamilyTree component
+const handleAddParent = (childId, gender) => {
+  if (!data || !childId) return;
+
+  // Generate new IDs
+  const newPersonId = generateNewId('person');
+  const newFamilyId = generateNewId('family');
+
+  // Create new person (parent)
+  const newPerson = {
+    id: newPersonId,
+    name: gender === 'M' ? 'New Father' : 'New Mother',
+    gender: gender,
+    birth: {}
+  };
+
+  // Find if child already has a family as child
+  let existingFamilyId = null;
+  Object.entries(data.families).forEach(([id, family]) => {
+    if (family.children.includes(childId)) {
+      existingFamilyId = id;
+    }
+  });
+
+  let updatedFamilies = { ...data.families };
+
+  if (existingFamilyId) {
+    // Add new parent to existing family
+    const existingFamily = data.families[existingFamilyId];
+    if (gender === 'M' && !existingFamily.husband) {
+      updatedFamilies[existingFamilyId] = {
+        ...existingFamily,
+        husband: newPersonId
+      };
+    } else if (gender === 'F' && !existingFamily.wife) {
+      updatedFamilies[existingFamilyId] = {
+        ...existingFamily,
+        wife: newPersonId
+      };
+    } else {
+      // If position is already taken, create new family
+      updatedFamilies[newFamilyId] = {
+        id: newFamilyId,
+        husband: gender === 'M' ? newPersonId : null,
+        wife: gender === 'F' ? newPersonId : null,
+        children: [childId]
+      };
+    }
+  } else {
+    // Create new family
+    updatedFamilies[newFamilyId] = {
+      id: newFamilyId,
+      husband: gender === 'M' ? newPersonId : null,
+      wife: gender === 'F' ? newPersonId : null,
+      children: [childId]
+    };
+  }
+
+  // Add new person to individuals
+  const updatedIndividuals = {
+    ...data.individuals,
+    [newPersonId]: newPerson
+  };
+
+  // Update data
+  const newData = {
+    ...data,
+    individuals: updatedIndividuals,
+    families: updatedFamilies
+  };
+
+  setData(newData);
+
+  // Update GEDCOM
+  const updatedGedcom = generateUpdatedGEDCOM(updatedIndividuals, updatedFamilies);
+  setGedcomText(updatedGedcom);
+
+  // Select the new person for editing
+  setSelectedPerson(newPerson);
+  setShowDetails(true);
+};
+
+const handleAddChild = (parentId) => {
+  if (!data || !parentId) return;
+
+  // Generate new IDs
+  const newPersonId = generateNewId('person');
+  const newFamilyId = generateNewId('family');
+
+  // Create new person
+  const newPerson = {
+    id: newPersonId,
+    name: 'New Child',
+    gender: 'U',
+    birth: {}
+  };
+
+  // Find parent's family or create new one
+  let familyId = null;
+  Object.entries(data.families).forEach(([id, family]) => {
+    if (family.husband === parentId || family.wife === parentId) {
+      familyId = id;
+    }
+  });
+
+  if (!familyId) {
+    // Create new family if parent doesn't have one
+    familyId = newFamilyId;
+    data.families[familyId] = {
+      id: familyId,
+      husband: null,
+      wife: null,
+      children: []
+    };
+    
+    // Set parent as husband or wife based on gender
+    const parent = data.individuals[parentId];
+    if (parent.gender === 'M') {
+      data.families[familyId].husband = parentId;
+    } else {
+      data.families[familyId].wife = parentId;
+    }
+  }
+
+  // Add new person to individuals
+  const updatedIndividuals = {
+    ...data.individuals,
+    [newPersonId]: newPerson
+  };
+
+  // Add new person as child to family
+  const updatedFamilies = {
+    ...data.families,
+    [familyId]: {
+      ...data.families[familyId],
+      children: [...data.families[familyId].children, newPersonId]
+    }
+  };
+
+  // Update data
+  const newData = {
+    ...data,
+    individuals: updatedIndividuals,
+    families: updatedFamilies
+  };
+
+  setData(newData);
+
+  // Update GEDCOM
+  const updatedGedcom = generateUpdatedGEDCOM(updatedIndividuals, updatedFamilies);
+  setGedcomText(updatedGedcom);
+
+  // Select the new person for editing
+  setSelectedPerson(newPerson);
+  setShowDetails(true);
+};
+const handleAddSpouse = (personId) => {
+  if (!data || !personId) return;
+
+  // Generate new IDs
+  const newPersonId = generateNewId('person');
+  const newFamilyId = generateNewId('family');
+
+  // Get the existing person's gender to determine new spouse's gender
+  const existingPerson = data.individuals[personId];
+  const newSpouseGender = existingPerson.gender === 'M' ? 'F' : 'M';
+
+  // Create new person (spouse)
+  const newSpouse = {
+    id: newPersonId,
+    name: newSpouseGender === 'M' ? 'New Husband' : 'New Wife',
+    gender: newSpouseGender,
+    birth: {}
+  };
+
+  // Create new family
+  const newFamily = {
+    id: newFamilyId,
+    husband: newSpouseGender === 'M' ? newPersonId : personId,
+    wife: newSpouseGender === 'F' ? newPersonId : personId,
+    children: []
+  };
+
+  // Update data structures
+  const updatedIndividuals = {
+    ...data.individuals,
+    [newPersonId]: newSpouse
+  };
+
+  const updatedFamilies = {
+    ...data.families,
+    [newFamilyId]: newFamily
+  };
+
+  // Update data
+  const newData = {
+    ...data,
+    individuals: updatedIndividuals,
+    families: updatedFamilies
+  };
+
+  setData(newData);
+
+  // Update GEDCOM
+  const updatedGedcom = generateUpdatedGEDCOM(updatedIndividuals, updatedFamilies);
+  setGedcomText(updatedGedcom);
+
+  // Select the new spouse for editing
+  setSelectedPerson(newSpouse);
+  setShowDetails(true);
+};
+
+  const handleDownloadGedcom = () => {
+    const blob = new Blob([gedcomText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'updated_family_tree.ged';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  useEffect(() => {
+    if (!data || !svgRef.current) return;
+  
+    const width = 1000;
+    const height = 600;
+    const nodeWidth = 100;
+    const nodeHeight = 35;
+    const spouseGap = 20;
+    const levelGap = 80;
+    
+    // Clear previous SVG content
+    d3.select(svgRef.current).selectAll("*").remove();
+  
+    const svg = d3.select(svgRef.current)
+      .attr('width', width)
+      .attr('height', height)
+      .append('g')
+      .attr('transform', `translate(${width / 2},50)`);
+  
+    // Modified tree layout to ensure proper centering
+    const treeLayout = d3.tree()
+    .nodeSize([nodeWidth * 2.5, nodeHeight * 4])
+    .separation((a, b) => {
+      // Adjust separation based on whether nodes share the same parent
+      if (a.parent === b.parent) {
+        // If either node is an only child, reduce separation to center it
+        if (a.parent && a.parent.children.length === 1) {
+          return 0.8;  // Reduced separation for single children
+        }
+        return 1.2;    // Normal sibling separation
+      }
+      return 1.8;      // Separation between different parent nodes
+    });
+
+    const centerSingleChildren = (node) => {
+      if (node.children) {
+        node.children.forEach(centerSingleChildren);
+        
+        // If there's only one child, adjust its position
+        if (node.children.length === 1 && node.data.spouse) {
+          const child = node.children[0];
+          // Center the child between the parents
+          child.x = node.x + (nodeWidth + spouseGap) / 2;
+        }
+      }
+      return node;
+    };
+  
+    // Modified hierarchy creation to handle centering
+    const createHierarchy = (familyId, processedNodes = new Set()) => {
+      if (!familyId || processedNodes.has(familyId)) return null;
+      const family = data.families[familyId];
+      if (!family) return null;
+    
+      processedNodes.add(familyId);
+    
+      const node = {
+        id: familyId,
+        family: family,
+        children: []
+      };
+    
+      // Add spouse information
+      if (family.husband && family.wife) {
+        node.primary = data.individuals[family.husband];
+        node.spouse = data.individuals[family.wife];
+      } else if (family.husband) {
+        node.primary = data.individuals[family.husband];
+      } else if (family.wife) {
+        node.primary = data.individuals[family.wife];
+      }
+    
+      // Process children and their families
+      if (family.children && family.children.length > 0) {
+        family.children.forEach(childId => {
+          // Find families where this child is a parent
+          const childFamilies = Object.entries(data.families)
+            .filter(([_, f]) => f.husband === childId || f.wife === childId)
+            .map(([id]) => id);
+    
+          if (childFamilies.length > 0) {
+            childFamilies.forEach(childFamilyId => {
+              if (!processedNodes.has(childFamilyId)) {
+                const childNode = createHierarchy(childFamilyId, processedNodes);
+                if (childNode) node.children.push(childNode);
+              }
+            });
+          } else {
+            // Add childless individuals
+            node.children.push({
+              id: childId,
+              individual: data.individuals[childId]
+            });
+          }
+        });
+      }
+    
+      return node;
+    };
+    const hierarchy = d3.hierarchy(createHierarchy(data.rootFamily.id));
+    const treeData = treeLayout(hierarchy);
+    centerSingleChildren(treeData);
+
+  
+    // Modified line drawing logic
+    const drawConnectingLines = () => {
+      const drawLine = (x1, y1, x2, y2, isSpouseLine = false) => {
+        svg.append('line')
+          .attr('x1', x1)
+          .attr('y1', y1)
+          .attr('x2', x2)
+          .attr('y2', y2)
+          .attr('stroke', '#666')
+          .attr('stroke-width', isSpouseLine ? 3 : 1.5);
+      };
+    
+      treeData.descendants().forEach(d => {
+        // Draw spouse connections
+        if (d.data.primary && d.data.spouse) {
+          const spouseLineY = d.y + nodeHeight/2;
+          const startX = d.x + nodeWidth;
+          const endX = d.x + nodeWidth + spouseGap;
+          drawLine(startX, spouseLineY, endX, spouseLineY, true);
+        }
+    
+        // Draw parent-child connections
+        if (d.children && d.children.length > 0) {
+          // Calculate parent center point
+          const parentCenterX = d.data.spouse ? 
+            d.x + nodeWidth + spouseGap/2 : // Center between spouses
+            d.x + nodeWidth/2;              // Center of single parent
+          const parentY = d.y + nodeHeight;
+    
+          // Calculate the vertical midpoint between parent and children
+          const childrenY = d.children[0].y;
+          const midY = parentY + (childrenY - parentY)/2;
+    
+          // Draw vertical line from parent
+          drawLine(parentCenterX, parentY, parentCenterX, midY);
+    
+          if (d.children.length === 1) {
+            // For single child, draw straight line
+            const childX = d.children[0].x + nodeWidth/2;
+            drawLine(parentCenterX, midY, childX, childrenY);
+          } else {
+            // For multiple children, draw horizontal connector and vertical lines to each child
+            const leftmostChild = d.children[0];
+            const rightmostChild = d.children[d.children.length - 1];
+            const leftX = leftmostChild.x + nodeWidth/2;
+            const rightX = rightmostChild.x + nodeWidth/2;
+    
+            // Draw horizontal connector
+            drawLine(leftX, midY, rightX, midY);
+    
+            // Draw vertical lines to each child
+            d.children.forEach(child => {
+              const childX = child.x + nodeWidth/2;
+              drawLine(childX, midY, childX, child.y);
+            });
+          }
+        }
+      });
+    };
+    // Helper function to draw lines
+    const drawLine = (x1, y1, x2, y2, isSpouseLine = false) => {
+      svg.append('line')
+        .attr('x1', x1)
+        .attr('y1', y1)
+        .attr('x2', x2)
+        .attr('y2', y2)
+        .attr('stroke', '#666')
+        .attr('stroke-width', isSpouseLine ? 3 : 1.5);
+    };
+  
+    // Draw lines first
+    drawConnectingLines();
+  
+    // Create and draw nodes
+    const nodes = svg.selectAll('g.node')
+      .data(treeData.descendants())
+      .enter()
+      .append('g')
+      .attr('class', 'node')
+      .attr('transform', d => `translate(${d.x},${d.y})`);
+  
+    nodes.each(function(d) {
+      const node = d3.select(this);
+      
+      if (d.data.primary) {
+        drawPerson(node, d.data.primary, 0, 0);
+        if (d.data.spouse) {
+          drawPerson(node, d.data.spouse, nodeWidth + spouseGap, 0);
+        }
+      } else if (d.data.individual) {
+        drawPerson(node, d.data.individual, 0, 0);
+      }
+    });
+  
+    function drawPerson(container, person, x, y) {
+      const group = container.append('g')
+        .attr('transform', `translate(${x},${y})`)
+        .style('cursor', 'pointer')
+        .on('click', () => handleNodeClick(person))
+        .on('contextmenu', (event) => {
+          event.preventDefault();
+          const bounds = svgRef.current.getBoundingClientRect();
+          const transform = d3.zoomTransform(svgRef.current);
+          
+          // Calculate the actual position considering the SVG transform
+          const svgPoint = d3.pointer(event, svgRef.current);
+          
+          setContextMenu({
+            x: bounds.left + svgPoint[0],
+            y: bounds.top + svgPoint[1],
+            person: person
+          });
+        });
+
+      group.append('rect')
+        .attr('fill', person.gender === 'M' ? '#b8daff' : '#ffd6e5')
+        .attr('stroke', person.gender === 'M' ? '#84b9ff' : '#ffadd2')
+        .attr('stroke-width', 2)
+        .attr('width', nodeWidth)
+        .attr('height', nodeHeight)
+        .attr('rx', 5)
+        .attr('ry', 5);
+  
+      group.append('text')
+        .attr('x', nodeWidth/2)
+        .attr('y', nodeHeight/2)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'middle')
+        .attr('font-family', 'Arial')
+        .attr('font-size', '11px')
+        .text(person.name);
+    }
+  
+    // Add zoom behavior
+    const zoom = d3.zoom()
+      .scaleExtent([0.3, 2])
+      .on('zoom', (event) => {
+        svg.attr('transform', event.transform);
+        setZoomLevel(event.transform.k);
+      });
+  
+    d3.select(svgRef.current).call(zoom);
+  
+    // Initial zoom to fit content
+    const svgElement = svgRef.current;
+    const bbox = svgElement.getBBox();
+    const scale = Math.min(
+      width / bbox.width,
+      height / bbox.height
+    ) * 0.9;
+    
+    const transform = d3.zoomIdentity
+      .translate(
+        width/2 - bbox.x*scale - bbox.width*scale/2,
+        height/2 - bbox.y*scale - bbox.height*scale/2
+      )
+      .scale(scale);
+    
+    d3.select(svgRef.current)
+      .transition()
+      .duration(750)
+      .call(zoom.transform, transform);
+  
+  }, [data]);
+
+  // Replace the return statement in your FamilyTree component with this:
+  return (
+    <div className="flex flex-col min-h-screen bg-slate-50 p-4">
+      {/* Upload Section */}
+      <div className="mb-4 space-y-4">
+        <div className="flex flex-wrap gap-4 items-start">
+          <div className="flex-1 space-y-2">
+            <input
+              type="file"
+              accept=".ged"
+              onChange={handleFileUpload}
+              className="block w-full px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <textarea
+              value={gedcomText}
+              onChange={handleTextInput}
+              placeholder="Or paste your GEDCOM data here..."
+              className="w-full h-32 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+          <button 
+            onClick={handleGenerateTree}
+            disabled={!parsedData}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Generate Family Tree
+          </button>
+        </div>
+  
+        {parsedData && (
+          <div className="flex items-center gap-2 text-green-600">
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+            </svg>
+            <span>Data loaded successfully</span>
+          </div>
+        )}
+  
+        {error && (
+          <div className="p-3 text-red-700 bg-red-50 rounded-md">
+            {error}
+          </div>
+        )}
+      </div>
+  
+      {/* Tree Visualization */}
+      <div className="flex-1 bg-white rounded-lg shadow-lg overflow-hidden">
+        <div className="relative w-full h-[calc(100vh-16rem)] overflow-auto">
+          <svg 
+            ref={svgRef}
+            className="min-w-full min-h-full"
+          />
+          {contextMenu && (
+  <>
+    <div 
+      className="fixed inset-0 z-40"
+      onClick={() => setContextMenu(null)}
+    />
+    <ContextMenu
+      x={contextMenu.x}
+      y={contextMenu.y}
+      onClose={() => setContextMenu(null)}
+      onEdit={() => {
+        setSelectedPerson(contextMenu.person);
+        setShowDetails(true);
+        setContextMenu(null);
+      }}
+      onDelete={() => {
+        handleDeletePerson(contextMenu.person.id);
+        setContextMenu(null);
+      }}
+    />
+  </>
+)}
+
+{showDetails && selectedPerson && data?.individuals?.[selectedPerson.id] && (
+  <PersonDetailsPanel
+    person={data.individuals[selectedPerson.id]}
+    onClose={() => setShowDetails(false)}
+    onSave={handleDetailsSave}
+    onDelete={handleDeletePerson}
+    onAddChild={handleAddChild}
+    onAddParent={handleAddParent}
+    onAddSpouse={handleAddSpouse}  // Add this line
+    individuals={data.individuals}
+    families={data.families}
+  />
+)}
+ </div>
+      </div>
+  
+      {/* Legend and Controls */}
+      {data && (
+        <div className="mt-4 flex justify-between items-center">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 rounded border border-blue-300 bg-blue-100"></div>
+              <span className="text-sm text-gray-600">Male</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 rounded border border-pink-300 bg-pink-100"></div>
+              <span className="text-sm text-gray-600">Female</span>
+            </div>
+          </div>
+          <button 
+            onClick={handleDownloadGedcom}
+            className="px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+          >
+            Download Updated GEDCOM
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const generateUpdatedGEDCOM = (individuals, families) => {
+  let gedcom = '0 HEAD\n1 CHAR UTF-8\n';
+
+  // Add individuals
+  Object.values(individuals).forEach(individual => {
+    gedcom += `0 @${individual.id}@ INDI\n`;
+    gedcom += `1 NAME ${individual.name}\n`;
+    gedcom += `1 SEX ${individual.gender}\n`;
+    if (individual.birth?.date) {
+      gedcom += '1 BIRT\n';
+      gedcom += `2 DATE ${individual.birth.date}\n`;
+    }
+  });
+
+  // Add families
+  Object.values(families).forEach(family => {
+    gedcom += `0 @${family.id}@ FAM\n`;
+    if (family.husband) gedcom += `1 HUSB @${family.husband}@\n`;
+    if (family.wife) gedcom += `1 WIFE @${family.wife}@\n`;
+    family.children.forEach(childId => {
+      gedcom += `1 CHIL @${childId}@\n`;
+    });
+  });
+
+  gedcom += '0 TRLR\n';
+  return gedcom;
+};
+
+export default FamilyTree;
