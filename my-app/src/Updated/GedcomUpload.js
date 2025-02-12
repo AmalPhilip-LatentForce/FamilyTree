@@ -482,18 +482,18 @@ const GedcomUpload = ({ onDataParsed }) => {
     let currentEntity = null;
     let currentType = null;
     let currentSubTag = null;
-
+  
     // First pass: Collect basic information
     lines.forEach((line) => {
       if (!line.trim()) return;
-
+  
       const [level, ...rest] = line.trim().split(" ");
       const levelNum = parseInt(level);
-
+  
       if (levelNum === 0) {
         const id = rest[0];
         const type = rest[1];
-
+  
         if (type === "INDI") {
           currentType = "INDI";
           currentEntity = id.replace(/@/g, "");
@@ -505,6 +505,7 @@ const GedcomUpload = ({ onDataParsed }) => {
             birthplace: "",
             deathplace: "",
             gender: "",
+            parent_union: null, // Ensure parent_union is initialized
           };
         } else if (type === "FAM") {
           currentType = "FAM";
@@ -521,7 +522,7 @@ const GedcomUpload = ({ onDataParsed }) => {
       } else if (currentEntity) {
         const tag = rest[0];
         const value = rest.slice(1).join(" ");
-
+  
         if (currentType === "INDI") {
           switch (tag) {
             case "NAME":
@@ -553,10 +554,13 @@ const GedcomUpload = ({ onDataParsed }) => {
               }
               break;
             case "SEX":
-                persons[currentEntity].gender = value.trim();
-                break;
+              persons[currentEntity].gender = value.trim();
+              break;
+            case "FAMC":
+              // Store parent union for child
+              persons[currentEntity].parent_union = value.replace(/@/g, "");
+              break;
             default:
-              // Handle other tags if needed
               break;
           }
         } else if (currentType === "FAM") {
@@ -588,15 +592,141 @@ const GedcomUpload = ({ onDataParsed }) => {
               links.push([currentEntity, childId]);
               break;
             default:
-              // Handle other family tags if needed
               break;
           }
         }
       }
     });
+  
+    // Function to sort persons by generations
+    const sortPersonsByGenerations = (persons, unions) => {
+      const getGeneration = (personId, cache = new Map()) => {
+        if (cache.has(personId)) return cache.get(personId);
+        
+        const person = persons[personId];
+        if (!person.parent_union) {
+          cache.set(personId, 0);
+          return 0;
+        }
+  
+        const union = unions[person.parent_union];
+        if (!union || !union.partner.length) {
+          cache.set(personId, 0);
+          return 0;
+        }
+  
+        const parentGen = Math.max(
+          ...union.partner.map(parentId => getGeneration(parentId, cache))
+        );
+        const generation = parentGen + 1;
+        cache.set(personId, generation);
+        return generation;
+      };
+  
+      // Sort persons by generation and then by ID within same generation
+      const sortedPersons = {};
+      Object.keys(persons)
+        .sort((a, b) => {
+          const genA = getGeneration(a);
+          const genB = getGeneration(b);
+          if (genA !== genB) return genA - genB;
+          
+          // If same generation, maintain original order by ID
+          const personA = persons[a];
+          const personB = persons[b];
+          
+          // Sort by parent union first if in same generation
+          if (personA.parent_union !== personB.parent_union) {
+            return (personA.parent_union || "").localeCompare(personB.parent_union || "");
+          }
+          
+          return a.localeCompare(b);
+        })
+        .forEach(id => {
+          sortedPersons[id] = persons[id];
+        });
+  
+      return sortedPersons;
+    };
+  
+    // Find the start person (earliest generation)
+    const findStartPerson = (persons) => {
+      return Object.values(persons).find(person => !person.parent_union)?.id || "I1";
+    };
+  
+    // Sort persons by generation
+    const sortedPersons = sortPersonsByGenerations(persons, unions);
+    const start = findStartPerson(sortedPersons);
+  
+    return { start, persons: sortedPersons, unions, links };
+  };
 
-    const start = "I1";
-    return { start, persons, unions, links };
+  const sortFamilyMembers = (data) => {
+    const { persons, unions } = data;
+    
+    // Helper function to get generation number
+    const getGeneration = (personId, cache = new Map()) => {
+      if (cache.has(personId)) return cache.get(personId);
+      
+      const person = persons[personId];
+      if (!person || !person.parent_union) {
+        cache.set(personId, 0);
+        return 0;
+      }
+      
+      const union = unions[person.parent_union];
+      if (!union || !union.partner.length) {
+        cache.set(personId, 0);
+        return 0;
+      }
+      
+      const parentGen = Math.max(
+        ...union.partner.map(parentId => getGeneration(parentId, cache))
+      );
+      const gen = parentGen + 1;
+      cache.set(personId, gen);
+      return gen;
+    };
+    
+    // Helper function to get sibling order
+    const getSiblingOrder = (personId) => {
+      const person = persons[personId];
+      if (!person || !person.parent_union) return 0;
+      
+      const union = unions[person.parent_union];
+      if (!union) return 0;
+      
+      return union.children.indexOf(personId);
+    };
+    
+    // Sort persons by generation and sibling order
+    const sortedPersons = {};
+    Object.keys(persons)
+      .sort((a, b) => {
+        const genA = getGeneration(a);
+        const genB = getGeneration(b);
+        
+        if (genA !== genB) return genA - genB;
+        
+        // If same generation, sort by parent union
+        const personA = persons[a];
+        const personB = persons[b];
+        
+        if (personA.parent_union !== personB.parent_union) {
+          return (personA.parent_union || '').localeCompare(personB.parent_union || '');
+        }
+        
+        // If same parent union, sort by sibling order
+        return getSiblingOrder(a) - getSiblingOrder(b);
+      })
+      .forEach(id => {
+        sortedPersons[id] = persons[id];
+      });
+      
+    return {
+      ...data,
+      persons: sortedPersons
+    };
   };
 
   const addChildToGedcom = (content, childData, parentUnionId) => {
@@ -609,25 +739,81 @@ const GedcomUpload = ({ onDataParsed }) => {
       `1 SEX ${childData.gender}`,
       `1 BIRT`,
       `2 DATE ${childData.birthyear}`,
-      `2 PLAC ${childData.birthplace}`
+      `2 PLAC ${childData.birthplace}`,
+      `1 FAMC @${parentUnionId}@`
     ];
     
-    // Find the right place to insert the new individual
-    let lastIndiIndex = lines.length - 1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].includes('INDI')) {
-        lastIndiIndex = i;
+    // Find the appropriate insertion position
+    let insertIndex = -1;
+    let familySection = -1;
+    let inTargetFamily = false;
+    let lastChildIndex = -1;
+    
+    // First, locate the target family and its last child
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      // Mark the start of FAM records if we haven't found it yet
+      if (familySection === -1 && line.match(/^0.+FAM/)) {
+        familySection = i;
+      }
+      
+      // Check if we're in our target family
+      if (line === `0 @${parentUnionId}@ FAM`) {
+        inTargetFamily = true;
+        continue;
+      }
+      
+      // If we hit another 0-level record after our family, stop looking
+      if (inTargetFamily && line.startsWith('0 @') && !line.includes(parentUnionId)) {
         break;
+      }
+      
+      // While in our target family, track child references
+      if (inTargetFamily && line.startsWith('1 CHIL @')) {
+        const childRef = line.match(/@([^@]+)@/)[1];
+        // Find this child's INDI record
+        const childIndiIndex = lines.findIndex(l => l.includes(`@${childRef}@ INDI`));
+        if (childIndiIndex > lastChildIndex) {
+          lastChildIndex = childIndiIndex;
+        }
       }
     }
     
-    // Insert individual entry
-    lines.splice(lastIndiIndex + 1, 0, ...individualEntry);
+    // Determine insertion position
+    if (lastChildIndex !== -1) {
+      // Insert after the last child's INDI record
+      insertIndex = lastChildIndex + 1;
+      while (insertIndex < lines.length && lines[insertIndex].trim().startsWith('1 ')) {
+        insertIndex++;
+      }
+    } else {
+      // If no existing children, insert before FAM records
+      insertIndex = familySection !== -1 ? familySection : lines.length;
+    }
+    
+    // Insert the new INDI record
+    lines.splice(insertIndex, 0, ...individualEntry, '');
     
     // Add child to family
-    const familyLineIndex = lines.findIndex(line => line.includes(`@${parentUnionId}@ FAM`));
-    if (familyLineIndex !== -1) {
-      lines.splice(familyLineIndex + 1, 0, `1 CHIL @${childData.id}@`);
+    const familyIndex = lines.findIndex(line => line.includes(`@${parentUnionId}@ FAM`));
+    if (familyIndex !== -1) {
+      // Find the position for the new CHIL tag
+      let childInsertIndex = familyIndex + 1;
+      // Skip other 1-level tags until we find CHIL or a different level
+      while (childInsertIndex < lines.length && 
+             lines[childInsertIndex].startsWith('1 ') && 
+             !lines[childInsertIndex].includes('CHIL')) {
+        childInsertIndex++;
+      }
+      // Find the last CHIL tag if any exist
+      while (childInsertIndex < lines.length && 
+             lines[childInsertIndex].startsWith('1 CHIL')) {
+        childInsertIndex++;
+      }
+      
+      // Insert the new CHIL tag
+      lines.splice(childInsertIndex, 0, `1 CHIL @${childData.id}@`);
     }
     
     return lines.join('\n');
@@ -644,16 +830,40 @@ const GedcomUpload = ({ onDataParsed }) => {
     const parentUnionId = parentPerson.own_unions[0];
     
     try {
+      // Add parent union reference to child data
+      const enrichedChildData = {
+        ...childData,
+        parent_union: parentUnionId
+      };
+      
       // Update GEDCOM content
-      const updatedContent = addChildToGedcom(gedcomContent, childData, parentUnionId);
+      const updatedContent = addChildToGedcom(gedcomContent, enrichedChildData, parentUnionId);
       setGedcomContent(updatedContent);
       
-      // Update parsed data
-      const updatedData = parseGEDCOM(updatedContent);
+      // Update the parsed data structure directly
+      const updatedData = {
+        ...parsedData,
+        persons: {
+          ...parsedData.persons,
+          [childData.id]: enrichedChildData
+        },
+        unions: {
+          ...parsedData.unions,
+          [parentUnionId]: {
+            ...parsedData.unions[parentUnionId],
+            children: [...parsedData.unions[parentUnionId].children, childData.id]
+          }
+        },
+        links: [
+          ...parsedData.links,
+          [parentUnionId, childData.id]
+        ]
+      };
+      
+      // Update state and notify parent component
       setParsedData(updatedData);
       onDataParsed(updatedData);
       
-      // Clear any existing errors
       setError(null);
     } catch (err) {
       setError("Error adding child to GEDCOM");
@@ -678,9 +888,10 @@ const GedcomUpload = ({ onDataParsed }) => {
   const handleGenerateTree = () => {
     setIsGenerating(true);
     try {
-      const data = parseGEDCOM(gedcomContent);
-      setParsedData(data);
-      onDataParsed(data);
+      const parsedData = parseGEDCOM(gedcomContent);
+      const sortedData = sortFamilyMembers(parsedData);
+      setParsedData(sortedData);
+      onDataParsed(sortedData);
       setError(null);
     } catch (err) {
       setError("Error parsing GEDCOM file");

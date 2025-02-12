@@ -163,7 +163,6 @@ export const PersonListView = ({ persons, onUpdatePerson, onAddChild }) => {
       </div>
     );
   }
-  
   if (isEditing && selectedPerson) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
