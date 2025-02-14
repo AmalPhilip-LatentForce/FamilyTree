@@ -1667,13 +1667,13 @@ class FTDrawer {
     // initialize dag layout maker
     this.layout = d3
       .sugiyama()
-      .nodeSize([120, 120])
+      .nodeSize([120,120])
       .layering(d3.layeringSimplex())
       .decross(d3.decrossOpt)
       .coord(d3.coordVert());
 
     // defaults
-    this.orientation("horizontal");
+    this.orientation("vertical");
     this.transition_duration(750);
     this.link_path(FTDrawer.default_link_path_func);
     this.node_label(FTDrawer.default_node_label_func);
