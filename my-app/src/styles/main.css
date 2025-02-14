@@ -1,4 +1,4 @@
-body {
+/* body {
     width: 100%;
     height: 100%;
     overflow: auto;
@@ -46,4 +46,125 @@ body {
   svg {
     display: block;
     margin: auto;
+  } */
+
+
+  /* Add these CSS styles to your stylesheet */
+/* .node rect.person.male {
+    fill: #ADD8E6;  
+    stroke: #4682B4; 
+    stroke-width: 2px;
   }
+  
+  .node rect.person.female {
+    fill: #FFB6C1;  
+    stroke: #DB7093; 
+    stroke-width: 2px;
+  }
+  
+  .node rect.person.extendable {
+    stroke-dasharray: none;
+  }
+  
+  .node rect.person.non-extendable {
+    stroke-dasharray: none;
+  }
+  
+  .node text.node-label {
+    font-size: 12px;
+    font-family: Arial, sans-serif;
+    fill: #333;
+    pointer-events: none;
+  }
+  
+
+  .node rect.person:hover {
+    opacity: 0.8;
+    cursor: pointer;
+  } */
+
+
+  body {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+}
+
+/* Hide union nodes completely */
+.node rect:not(.male):not(.female) {
+    display: none;
+}
+
+/* Hide union node labels */
+.node:not(:has(.male)):not(:has(.female)) {
+    display: none;
+}
+
+/* Base person styles */
+.person {
+    stroke-width: 2px;
+}
+
+/* Gender-specific styles */
+.node rect.person.male {
+    fill: #ADD8E6;  /* Light blue for male */
+    stroke: #4682B4; /* Darker blue border */
+}
+
+.node rect.person.female {
+    fill: #FFB6C1;  /* Light pink for female */
+    stroke: #DB7093; /* Darker pink border */
+}
+
+/* Extendable/Non-extendable states */
+.node rect.person.extendable {
+    stroke-width: 3px;
+    fill-opacity: 0.8;
+}
+
+.node rect.person.non-extendable {
+    stroke-width: 2px;
+    fill-opacity: 1;
+}
+
+/* Node label styling */
+.node-label {
+    font: 12px sans-serif;
+    pointer-events: none;
+}
+
+/* Connection lines */
+.link {
+    fill: none;
+    stroke: #ccc;
+    stroke-width: 2px;
+}
+
+/* Tooltip styling */
+.tooltip {
+    position: absolute;
+    font: 12px sans-serif;
+    padding: 12px;
+    background: rgba(0, 0, 0, 0.8);
+    color: #fff;
+    border-radius: 2px;
+}
+
+/* Container styling */
+.family-tree-container {
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    position: relative;
+}
+
+svg {
+    display: block;
+    margin: auto;
+}
+
+/* Hover effects */
+.node rect.person:hover {
+    opacity: 0.7;
+    cursor: pointer;
+}
